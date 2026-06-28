@@ -4,6 +4,7 @@ import numpy as np
 from scipy.signal import butter, filtfilt, detrend
 import pywt
 import pandas as pd
+from scipy.signal import find_peaks
 
 
 def _to_v2c_like_bytes(values: np.ndarray, fs: float | None = None, units: str = "cm/s^2", per_line: int = 10) -> bytes:
@@ -220,17 +221,24 @@ def wavelet_cf_highfreq(acc, wavelet: str = "db4", num_high_levels: int = 3):
 
 
 
-def detect(cf: np.ndarray, method: str = "mean_std", k: float = 1.0, absolute: float | None = None):
+def detect(cf, method="mean_std", k=1.0, absolute=None):
     cf = np.asarray(cf)
 
     if cf.size == 0:
         return np.array([], dtype=int), np.nan
+
     if method == "absolute" and absolute is not None:
         thr = float(absolute)
     else:
         thr = float(np.mean(cf) + k * np.std(cf))
-    idx = np.where(cf > thr)[0]
-    return idx, thr
+
+    peaks, _ = find_peaks(
+        cf,
+        height=thr,
+        distance=200
+    )
+
+    return peaks, thr
 
 
 def run_pipeline(file_bytes: bytes | None, fs: float = 100.0, lowcut: float = 0.1, highcut: float = 40.0, wavelet: str = "db4", threshold_mode: str = "mean_std", k: float = 1.0, absolute: float | None = None):
@@ -241,6 +249,7 @@ def run_pipeline(file_bytes: bytes | None, fs: float = 100.0, lowcut: float = 0.
     coeffs = wavelet_decompose(filtered, wavelet)
     cf = wavelet_cf_highfreq(filtered, wavelet=wavelet, num_high_levels=3)
     detections, thr = detect(cf, method=threshold_mode, k=k, absolute=absolute)
+    p_pick = int(detections[0]) if len(detections) else None
     return {
         "acc": acc,
         "filtered": filtered,
@@ -248,4 +257,5 @@ def run_pipeline(file_bytes: bytes | None, fs: float = 100.0, lowcut: float = 0.
         "cf": cf,
         "detections": detections,
         "threshold": thr,
+        "p_pick": p_pick
     }

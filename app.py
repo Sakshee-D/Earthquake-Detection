@@ -7,6 +7,7 @@ import google.generativeai as genai
 import textwrap
 from datetime import datetime
 import matplotlib as mpl
+from scipy.signal import find_peaks
 from urllib.request import urlopen
 
 from dsp_pipeline import (
@@ -107,7 +108,11 @@ try:
 except Exception as e:
     st.error(f"Pipeline error: {e}")
     st.stop()
+p_pick = results["p_pick"]
 
+if p_pick is not None:
+    st.metric("Primary P-Wave Pick", p_pick)
+    st.metric("Arrival Time (s)", round(p_pick / fs, 2))
 acc = np.asarray(results.get("acc", []))
 filtered = np.asarray(results.get("filtered", []))
 cf = np.asarray(results.get("cf", []))
@@ -138,49 +143,49 @@ if detections.size > 0:
 else:
     st.info("No P-wave detected using wavelet CF method.")
 
-# --- determine P-wave index robustly using STA/LTA (preferred for first arrivals) ---
-def sta_lta_trigger(sig, fs, sta_sec=0.5, lta_sec=5.0, rel_thresh=3.0):
-    """
-    Simple STA/LTA: short-term average over sta_sec, long-term avg over lta_sec.
-    Returns first index where STA/LTA > rel_thresh (or None).
-    """
-    n = len(sig)
-    sta_n = max(1, int(round(sta_sec * fs)))
-    lta_n = max(sta_n + 1, int(round(lta_sec * fs)))
+def sta_lta_trigger(sig, fs, sta_sec=0.2, lta_sec=3.0, rel_thresh=2.0):
 
-    # use absolute amplitude
     a = np.abs(sig)
 
-    # moving averages via convolution
-    sta = np.convolve(a, np.ones(sta_n)/sta_n, mode='same')
-    lta = np.convolve(a, np.ones(lta_n)/lta_n, mode='same')
+    sta_n = max(1, int(sta_sec * fs))
+    lta_n = max(sta_n + 1, int(lta_sec * fs))
 
-    # avoid divide by zero
-    with np.errstate(divide='ignore', invalid='ignore'):
-        ratio = np.where(lta > 0, sta / lta, 0.0)
+    sta = np.convolve(a, np.ones(sta_n) / sta_n, mode="same")
+    lta = np.convolve(a, np.ones(lta_n) / lta_n, mode="same")
 
-    # find first crossing
-    idxs = np.where(ratio > rel_thresh)[0]
-    if idxs.size > 0:
-        return int(idxs[0])
-    return None
+    with np.errstate(divide="ignore", invalid="ignore"):
+        ratio = np.where(lta > 0, sta / lta, 0)
 
-# Try STA/LTA first (recommended)
-p_wave_index = None
+    # Remove edge artifacts
+    ratio[:lta_n] = 0
+    ratio[-lta_n:] = 0
+
+    peaks, props = find_peaks(
+        ratio,
+        height=rel_thresh,
+        distance=int(fs)
+    )
+
+    if len(peaks) == 0:
+        return None, ratio
+
+    p_pick = int(peaks[0])
+
+    return p_pick, ratio
+
 try:
-    # tune sta/lta params if necessary
-    p_wave_index = sta_lta_trigger(filtered, fs, sta_sec=0.2, lta_sec=3.0, rel_thresh=2.5)
+    p_wave_index, ratio = sta_lta_trigger(
+        filtered,
+        fs,
+        sta_sec=0.3,
+        lta_sec=2.5,
+        rel_thresh=1.4
+    )
 except Exception:
     p_wave_index = None
+    ratio = None
 
-# If STA/LTA failed, fallback to CF detection (first detection)
-if p_wave_index is None:
-    if detections is not None and getattr(detections, "size", 0) > 0:
-        p_wave_index = int(detections[0])
-    else:
-        p_wave_index = None
 
-# --- Plot a safe P-wave window around detected index ---
 if p_wave_index is not None:
     # define window length in seconds (pre and post)
     pre_sec = 0.5   # show 0.5 s before arrival
@@ -194,24 +199,24 @@ if p_wave_index is not None:
     p_wave_segment = filtered[start:end]
     x_global = np.arange(start, end)  # global sample indices for correct axis
 
-    st.subheader("Detected P-Wave Segment")
     fig_p, ax_p = plt.subplots(figsize=(10, 3))
     ax_p.plot(x_global, p_wave_segment, color="tab:orange", lw=1.2, label="Filtered")
     ax_p.axvline(p_wave_index, color="r", ls="--", label="Detected P-Wave")
     ax_p.set_xlabel("Sample index")
     ax_p.set_ylabel(f"Filtered {units_label}")
+    ax_p.set_title("P-wave Detection (STA/LTA based)")
     ax_p.grid(True, alpha=0.3)
     ax_p.legend(loc="upper right")
     st.pyplot(fig_p, clear_figure=True)
 else:
     st.info("No P-wave detected (try lowering thresholds or alternative method).")
 
-# --- Identify first P-wave detection (if any) ---
-detections = np.asarray(detections)
-if detections.size > 0:
-    p_wave_index = detections[0]
-else:
-    p_wave_index = None
+
+#detections = np.asarray(detections)
+#if detections.size > 0:
+#    p_wave_index = detections[0]
+#else:
+#    p_wave_index = None
 
 
 
@@ -257,7 +262,7 @@ st.divider()
 # Stats
 detections = np.asarray(detections)
 st.subheader("Summary")
-colA, colB, colC, colD = st.columns(4)
+colA, colB, colC, colD,colE,colF,colG,colH = st.columns(8)
 with colA:
     st.metric("Samples", int(acc.size))
 with colB:
@@ -267,6 +272,17 @@ with colC:
     st.metric("Detections", int(detections.size))
 with colD:
     st.metric("Threshold", f"{thr:.3f}")
+with colE:
+    st.metric("Primary P-Wave Pick (wavelet based)", p_pick if p_pick is not None else "None")
+with colF:
+    st.metric("Arrival Time (s)", round(p_pick / fs, 2) if p_pick is not None else "None")
+with colG:
+     st.metric(
+        "STA/LTA  P Wave Pick",
+        p_wave_index if p_wave_index is not None else "None"
+    )
+with colH:
+    st.metric("Arrival Time (s)", round(p_wave_index / fs, 2) if p_wave_index is not None else "None")
 
 with st.expander("Preview first 20 values (raw)"):
     st.write(acc[:20])
